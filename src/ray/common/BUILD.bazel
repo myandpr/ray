@@ -1,9 +1,7 @@
 load("//bazel:ray.bzl", "ray_cc_library")
 
-ray_cc_library(
-    name = "compat",
-    hdrs = ["compat.h"],
-)
+# Note: the compat utilities live under //src/ray/util; this package intentionally
+# omits a compat target to avoid duplicating that implementation.
 
 ray_cc_library(
     name = "constants",
