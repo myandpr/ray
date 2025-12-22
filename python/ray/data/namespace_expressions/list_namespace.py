@@ -195,12 +195,20 @@ class _ListNamespace:
                 raise TypeError("list.sort() requires a list column.")
 
             original_type = arr_type
+            null_mask = arr.is_null() if arr.null_count else None
             sort_arr = arr
             if pyarrow.types.is_fixed_size_list(arr_type):
-                list_type = pyarrow.list_(arr_type.value_type)
-                sort_arr = arr.cast(list_type)
+                child_type = arr_type.value_type
+                list_size = arr_type.list_size
+                if null_mask is not None:
+                    filler_values = pyarrow.nulls(len(arr) * list_size, type=child_type)
+                    filler = pyarrow.FixedSizeListArray.from_arrays(
+                        filler_values, list_size
+                    )
+                    sort_arr = pc.if_else(null_mask, filler, arr)
+                list_type = pyarrow.list_(child_type)
+                sort_arr = sort_arr.cast(list_type)
                 arr_type = sort_arr.type
-
             values = pc.list_flatten(sort_arr)
             if len(values):
                 row_indices = pc.list_parent_indices(sort_arr)
@@ -226,7 +234,6 @@ class _ListNamespace:
             offsets_type = pyarrow.int64() if is_large else pyarrow.int32()
             offsets = pc.cast(offsets, offsets_type)
 
-            null_mask = sort_arr.is_null() if sort_arr.null_count else None
             array_cls = pyarrow.LargeListArray if is_large else pyarrow.ListArray
             sorted_arr = array_cls.from_arrays(offsets, values, mask=null_mask)
 
@@ -254,7 +261,9 @@ class _ListNamespace:
 
             n_rows: int = len(arr)
             if len(all_scalars) == 0:
-                offsets: pyarrow.Array = pyarrow.repeat(0, n_rows + 1)
+                offsets: pyarrow.Array = pyarrow.array(
+                    [0] * (n_rows + 1), type=pyarrow.int64()
+                )
             else:
                 row_indices: pyarrow.Array = pc.take(
                     pc.list_parent_indices(arr),
@@ -265,7 +274,9 @@ class _ListNamespace:
                 rows_with_scalars: pyarrow.Array = pc.struct_field(vc, "values")
                 scalar_counts: pyarrow.Array = pc.struct_field(vc, "counts")
 
-                row_sequence: pyarrow.Array = pyarrow.arange(0, n_rows)
+                row_sequence: pyarrow.Array = pyarrow.array(
+                    list(range(n_rows)), type=pyarrow.int64()
+                )
                 positions: pyarrow.Array = pc.index_in(
                     row_sequence, value_set=rows_with_scalars
                 )
