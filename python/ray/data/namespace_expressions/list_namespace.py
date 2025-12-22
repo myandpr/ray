@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Literal, Union
 
-import numpy as np
 import pyarrow
 import pyarrow.compute as pc
 
@@ -14,6 +13,42 @@ from ray.data.expressions import pyarrow_udf
 
 if TYPE_CHECKING:
     from ray.data.expressions import Expr, UDFExpr
+
+
+def _infer_flattened_dtype(expr: "Expr") -> DataType:
+    """Infer the return DataType after flattening one level of list nesting."""
+    if not expr.data_type.is_arrow_type():
+        return DataType(object)
+
+    arrow_type = expr.data_type.to_arrow_dtype()
+    outer_dtype = DataType.from_arrow(arrow_type)
+    if not outer_dtype.is_list_type():
+        return DataType(object)
+
+    child_type = arrow_type.value_type
+    child_dtype = DataType.from_arrow(child_type)
+    if not child_dtype.is_list_type():
+        return DataType(object)
+
+    if pyarrow.types.is_large_list(arrow_type):
+        return DataType.from_arrow(pyarrow.large_list(child_type.value_type))
+    else:
+        return DataType.from_arrow(pyarrow.list_(child_type.value_type))
+
+
+def _validate_nested_list(arr_type: pyarrow.DataType) -> None:
+    """Raise TypeError if arr_type is not a list of lists."""
+    outer_dtype = DataType.from_arrow(arr_type)
+    if not outer_dtype.is_list_type():
+        raise TypeError(
+            "list.flatten() requires a list column whose elements are also lists."
+        )
+
+    child_dtype = DataType.from_arrow(arr_type.value_type)
+    if not child_dtype.is_list_type():
+        raise TypeError(
+            "list.flatten() requires a list column whose elements are also lists."
+        )
 
 
 @dataclass
@@ -123,7 +158,9 @@ class _ListNamespace:
         return _list_slice(self._expr)
 
     def sort(
-        self, order: str = "ascending", null_placement: str = "at_end"
+        self,
+        order: Literal["ascending", "descending"] = "ascending",
+        null_placement: Literal["at_start", "at_end"] = "at_end",
     ) -> "UDFExpr":
         """Sort the elements within each list.
 
@@ -147,159 +184,109 @@ class _ListNamespace:
 
         return_dtype = self._expr.data_type
 
-        if hasattr(pc, "list_sort"):
-
-            @pyarrow_udf(return_dtype=return_dtype)
-            def _list_sort(arr: pyarrow.Array) -> pyarrow.Array:
-                return pc.list_sort(arr, order=order, null_placement=null_placement)
-
-            return _list_sort(self._expr)
-
         @pyarrow_udf(return_dtype=return_dtype)
-        def _list_sort_python(arr: pyarrow.Array) -> pyarrow.Array:
-            """Fallback implementation when PyArrow list_sort is unavailable."""
+        def _list_sort(arr: pyarrow.Array) -> pyarrow.Array:
+            if isinstance(arr, pyarrow.ChunkedArray):
+                arr = arr.combine_chunks()
 
-            def _sort_single_list(values):
-                if values is None:
-                    return None
-                non_null = [value for value in values if value is not None]
-                non_null.sort(reverse=order == "descending")
-                null_count = len(values) - len(non_null)
-                nulls = [None] * null_count
-                if null_placement == "at_start":
-                    return nulls + non_null
-                else:
-                    return non_null + nulls
+            arr_type = arr.type
+            arr_dtype = DataType.from_arrow(arr_type)
+            if not arr_dtype.is_list_type():
+                raise TypeError("list.sort() requires a list column.")
 
-            sorted_lists = [_sort_single_list(values) for values in arr.to_pylist()]
-            return pyarrow.array(sorted_lists, type=arr.type)
+            original_type = arr_type
+            sort_arr = arr
+            if pyarrow.types.is_fixed_size_list(arr_type):
+                list_type = pyarrow.list_(arr_type.value_type)
+                sort_arr = arr.cast(list_type)
+                arr_type = sort_arr.type
 
-        return _list_sort_python(self._expr)
+            values = pc.list_flatten(sort_arr)
+            if len(values):
+                row_indices = pc.list_parent_indices(sort_arr)
+                struct = pyarrow.StructArray.from_arrays(
+                    [row_indices, values],
+                    ["row", "value"],
+                )
+                sorted_indices = pc.sort_indices(
+                    struct,
+                    sort_keys=[("row", "ascending"), ("value", order)],
+                    null_placement=null_placement,
+                )
+                values = pc.take(values, sorted_indices)
+
+            lengths = pc.list_value_length(sort_arr)
+            lengths = pc.fill_null(lengths, 0)
+            cumsum = pc.cumulative_sum(lengths)
+            offsets = pyarrow.concat_arrays(
+                [pyarrow.array([0], type=cumsum.type), cumsum]
+            )
+
+            is_large = pyarrow.types.is_large_list(arr_type)
+            offsets_type = pyarrow.int64() if is_large else pyarrow.int32()
+            offsets = pc.cast(offsets, offsets_type)
+
+            null_mask = sort_arr.is_null() if sort_arr.null_count else None
+            array_cls = pyarrow.LargeListArray if is_large else pyarrow.ListArray
+            sorted_arr = array_cls.from_arrays(offsets, values, mask=null_mask)
+
+            if pyarrow.types.is_fixed_size_list(original_type):
+                sorted_arr = sorted_arr.cast(original_type)
+
+            return sorted_arr
+
+        return _list_sort(self._expr)
 
     def flatten(self) -> "UDFExpr":
         """Flatten one level of nesting for each list value."""
 
-        return_dtype = DataType(object)
-        if self._expr.data_type.is_arrow_type():
-            arrow_type = self._expr.data_type.to_arrow_dtype()
-            if pyarrow.types.is_list(arrow_type) or pyarrow.types.is_large_list(
-                arrow_type
-            ):
-                child_type = arrow_type.value_type
-                list_factory = (
-                    pyarrow.large_list
-                    if pyarrow.types.is_large_list(arrow_type)
-                    else pyarrow.list_
-                )
-                if (
-                    pyarrow.types.is_list(child_type)
-                    or pyarrow.types.is_large_list(child_type)
-                    or pyarrow.types.is_fixed_size_list(child_type)
-                ):
-                    flattened_type = list_factory(child_type.value_type)
-                    return_dtype = DataType.from_arrow(flattened_type)
-            elif pyarrow.types.is_fixed_size_list(arrow_type):
-                child_type = arrow_type.value_type
-                if (
-                    pyarrow.types.is_list(child_type)
-                    or pyarrow.types.is_large_list(child_type)
-                    or pyarrow.types.is_fixed_size_list(child_type)
-                ):
-                    flattened_type = pyarrow.list_(child_type.value_type)
-                    return_dtype = DataType.from_arrow(flattened_type)
-
-        if hasattr(pc, "list_flatten"):
-
-            @pyarrow_udf(return_dtype=return_dtype)
-            def _list_flatten_arrow(arr: pyarrow.Array) -> pyarrow.Array:
-                if isinstance(arr, pyarrow.ChunkedArray):
-                    arr = arr.combine_chunks()
-
-                arr_type = arr.type
-                arr_is_list = pyarrow.types.is_list(
-                    arr_type
-                ) or pyarrow.types.is_large_list(arr_type)
-                arr_is_fixed_size = pyarrow.types.is_fixed_size_list(arr_type)
-                if not (arr_is_list or arr_is_fixed_size):
-                    raise TypeError(
-                        "list.flatten() requires a list column whose elements are also lists."
-                    )
-
-                child_type = arr_type.value_type
-                child_is_list = pyarrow.types.is_list(
-                    child_type
-                ) or pyarrow.types.is_large_list(child_type)
-                child_is_fixed_size = pyarrow.types.is_fixed_size_list(child_type)
-                if not (child_is_list or child_is_fixed_size):
-                    raise TypeError(
-                        "list.flatten() requires a list column whose elements are also lists."
-                    )
-
-                flattened_child_lists = pc.list_flatten(arr)
-                scalar_values = pc.list_flatten(flattened_child_lists)
-
-                child_to_parent = pc.list_parent_indices(arr)
-                scalar_to_child = pc.list_parent_indices(flattened_child_lists)
-
-                if len(scalar_values) == 0:
-                    counts = np.zeros(len(arr), dtype=np.int64)
-                else:
-                    parent_index_array = pc.take(child_to_parent, scalar_to_child)
-                    parent_indices = parent_index_array.to_numpy(zero_copy_only=False)
-                    counts = np.bincount(
-                        parent_indices,
-                        minlength=len(arr),
-                    ).astype(np.int64, copy=False)
-
-                offsets = np.zeros(len(arr) + 1, dtype=np.int64)
-                if counts.size > 0:
-                    np.cumsum(counts, out=offsets[1:])
-
-                arr_is_large = pyarrow.types.is_large_list(arr_type)
-                offsets_type = pyarrow.int64() if arr_is_large else pyarrow.int32()
-                offsets_array = pyarrow.array(offsets, type=offsets_type)
-                null_mask = arr.is_null() if arr.null_count else None
-
-                array_cls = (
-                    pyarrow.LargeListArray if arr_is_large else pyarrow.ListArray
-                )
-                return array_cls.from_arrays(
-                    offsets_array,
-                    scalar_values,
-                    mask=null_mask,
-                )
-
-            return _list_flatten_arrow(self._expr)
+        return_dtype = _infer_flattened_dtype(self._expr)
 
         @pyarrow_udf(return_dtype=return_dtype)
-        def _list_flatten_python(arr: pyarrow.Array) -> pyarrow.Array:
-            """Fallback implementation when PyArrow list_flatten is unavailable."""
-            import itertools
+        def _list_flatten(arr: pyarrow.Array) -> pyarrow.Array:
+            if isinstance(arr, pyarrow.ChunkedArray):
+                arr = arr.combine_chunks()
 
-            flattened_lists = []
-            for list_of_lists in arr.to_pylist():
-                if list_of_lists is None:
-                    flattened_lists.append(None)
-                    continue
+            _validate_nested_list(arr.type)
 
-                if not isinstance(list_of_lists, list):
-                    raise TypeError(
-                        "list.flatten() requires a list column whose elements are also lists."
-                    )
+            inner_lists: pyarrow.Array = pc.list_flatten(arr)
+            all_scalars: pyarrow.Array = pc.list_flatten(inner_lists)
 
-                valid_sublists = [sub for sub in list_of_lists if sub is not None]
-                for sub in valid_sublists:
-                    if not isinstance(sub, list):
-                        raise TypeError(
-                            "list.flatten() requires a list column whose elements are also lists."
-                        )
-                flattened = list(itertools.chain.from_iterable(valid_sublists))
-                flattened_lists.append(flattened)
+            n_rows: int = len(arr)
+            if len(all_scalars) == 0:
+                offsets: pyarrow.Array = pyarrow.repeat(0, n_rows + 1)
+            else:
+                row_indices: pyarrow.Array = pc.take(
+                    pc.list_parent_indices(arr),
+                    pc.list_parent_indices(inner_lists),
+                )
 
-            result_type = None
-            if return_dtype.is_arrow_type():
-                result_type = return_dtype.to_arrow_dtype()
+                vc: pyarrow.StructArray = pc.value_counts(row_indices)
+                rows_with_scalars: pyarrow.Array = pc.struct_field(vc, "values")
+                scalar_counts: pyarrow.Array = pc.struct_field(vc, "counts")
 
-            return pyarrow.array(flattened_lists, type=result_type)
+                row_sequence: pyarrow.Array = pyarrow.arange(0, n_rows)
+                positions: pyarrow.Array = pc.index_in(
+                    row_sequence, value_set=rows_with_scalars
+                )
 
-        return _list_flatten_python(self._expr)
+                counts: pyarrow.Array = pc.if_else(
+                    pc.is_null(positions),
+                    0,
+                    pc.take(scalar_counts, pc.fill_null(positions, 0)),
+                )
+
+                cumsum: pyarrow.Array = pc.cumulative_sum(counts)
+                offsets = pyarrow.concat_arrays(
+                    [pyarrow.array([0], type=cumsum.type), cumsum]
+                )
+
+            is_large: bool = pyarrow.types.is_large_list(arr.type)
+            offsets_type = pyarrow.int64() if is_large else pyarrow.int32()
+            offsets = pc.cast(offsets, offsets_type)
+
+            null_mask: pyarrow.Array | None = arr.is_null() if arr.null_count else None
+            array_cls: type = pyarrow.LargeListArray if is_large else pyarrow.ListArray
+            return array_cls.from_arrays(offsets, all_scalars, mask=null_mask)
+
+        return _list_flatten(self._expr)

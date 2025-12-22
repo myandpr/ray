@@ -100,14 +100,19 @@ You can also perform list-specific transformations like sorting and flattening:
 
 .. testcode::
 
+    import ray
+    from ray.data.expressions import col
+
     ds = ray.data.from_items([
         {"values": [3, 1, 2], "nested": [[1, 2], [3]]},
         {"values": [2, None, 5], "nested": [[4], []]}
     ])
 
-    ds = ds.with_columns(
-        sorted_values=col("values").list.sort(order="descending"),
-        flattened_nested=col("nested").list.flatten(),
+    ds = ds.with_column(
+        "sorted_values", col("values").list.sort(order="descending")
+    )
+    ds = ds.with_column(
+        "flattened_nested", col("nested").list.flatten()
     )
     ds.show()
 
