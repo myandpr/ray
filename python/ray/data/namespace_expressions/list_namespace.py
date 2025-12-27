@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Union
 
+import numpy as np
 import pyarrow
 import pyarrow.compute as pc
 
@@ -262,7 +263,7 @@ class _ListNamespace:
             n_rows: int = len(arr)
             if len(all_scalars) == 0:
                 offsets: pyarrow.Array = pyarrow.array(
-                    [0] * (n_rows + 1), type=pyarrow.int64()
+                    np.repeat(0, n_rows + 1), type=pyarrow.int64()
                 )
             else:
                 row_indices: pyarrow.Array = pc.take(
@@ -275,7 +276,7 @@ class _ListNamespace:
                 scalar_counts: pyarrow.Array = pc.struct_field(vc, "counts")
 
                 row_sequence: pyarrow.Array = pyarrow.array(
-                    list(range(n_rows)), type=pyarrow.int64()
+                    np.arange(n_rows, dtype=np.int64), type=pyarrow.int64()
                 )
                 positions: pyarrow.Array = pc.index_in(
                     row_sequence, value_set=rows_with_scalars
