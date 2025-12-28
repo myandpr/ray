@@ -89,6 +89,13 @@ class TestJobSubmitRequestValidation:
                 {"entrypoint": "abc", "metadata": {"hi": 1}}, JobSubmitRequest
             )
 
+    def test_entrypoint_resources_allow_strings(self):
+        req = validate_request_type(
+            {"entrypoint": "abc", "entrypoint_resources": {"fragile_node": "!1"}},
+            JobSubmitRequest,
+        )
+        assert req.entrypoint_resources == {"fragile_node": "!1"}
+
 
 def test_uri_to_http_and_back():
     assert uri_to_http_components("gcs://hello.zip") == ("gcs", "hello.zip")

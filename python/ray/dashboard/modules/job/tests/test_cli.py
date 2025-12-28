@@ -402,6 +402,10 @@ class TestSubmit:
                 """--entrypoint-resources={"Custom":3}""",
                 {"entrypoint_resources": {"Custom": 3}},
             ),
+            (
+                """--entrypoint-resources={"fragile_node":"!1"}""",
+                {"entrypoint_resources": {"fragile_node": "!1"}},
+            ),
         ],
     )
     def test_entrypoint_resources(self, mock_sdk_client, resources):

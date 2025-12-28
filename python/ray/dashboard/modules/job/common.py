@@ -542,9 +542,9 @@ class JobSubmitRequest:
                             f"got {type(k)}"
                         )
                 for v in self.entrypoint_resources.values():
-                    if not isinstance(v, (int, float)):
+                    if not isinstance(v, (int, float, str)):
                         raise TypeError(
-                            "entrypoint_resources values must be numbers, "
+                            "entrypoint_resources values must be numbers or strings, "
                             f"got {type(v)}"
                         )
 

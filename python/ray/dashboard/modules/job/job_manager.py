@@ -6,7 +6,7 @@ import random
 import string
 import time
 import traceback
-from typing import Any, AsyncIterator, Dict, Optional, Union
+from typing import Any, AsyncIterator, Dict, Optional, Tuple, Union
 
 import ray
 import ray._private.ray_constants as ray_constants
@@ -14,6 +14,7 @@ from ray._common.utils import Timer, run_background_task
 from ray._private.accelerators.npu import NOSET_ASCEND_RT_VISIBLE_DEVICES_ENV_VAR
 from ray._private.accelerators.nvidia_gpu import NOSET_CUDA_VISIBLE_DEVICES_ENV_VAR
 from ray._private.event.event_logger import get_event_logger
+from ray._private.label_utils import validate_label_selector
 from ray._raylet import GcsClient
 from ray.actor import ActorHandle
 from ray.core.generated.event_pb2 import Event
@@ -56,6 +57,40 @@ def generate_job_id() -> str:
     )
     id_part = "".join(rand.choices(possible_characters, k=16))
     return f"raysubmit_{id_part}"
+
+
+def _split_entrypoint_resources(
+    resources: Optional[Dict[str, Union[int, float, str]]]
+) -> Tuple[Optional[Dict[str, float]], Optional[Dict[str, str]]]:
+    """Separate numeric resource requests from label selectors."""
+    if resources in (None, {}):
+        return None, None
+
+    numeric_resources: Dict[str, float] = {}
+    label_selector: Dict[str, str] = {}
+
+    for key, value in resources.items():
+        if not isinstance(key, str):
+            raise TypeError(
+                "entrypoint_resources keys must be strings, "
+                f"got {type(key)} for key {key!r}"
+            )
+        if isinstance(value, (int, float)):
+            numeric_resources[key] = value
+        elif isinstance(value, str):
+            label_selector[key] = value
+        else:
+            raise TypeError(
+                "entrypoint_resources values must be numbers or strings, "
+                f"got {type(value)} for key {key!r}"
+            )
+
+    if label_selector:
+        error_message = validate_label_selector(label_selector)
+        if error_message:
+            raise ValueError(error_message)
+
+    return numeric_resources or None, label_selector or None
 
 
 class JobManager:
@@ -535,6 +570,12 @@ class JobManager:
         await self._recover_running_jobs_event.wait()
 
         logger.info(f"Starting job with submission_id: {submission_id}")
+        resources_for_supervisor = entrypoint_resources
+        label_selector = None
+        resources_for_supervisor, label_selector = _split_entrypoint_resources(
+            entrypoint_resources
+        )
+
         job_info = JobInfo(
             entrypoint=entrypoint,
             status=JobStatus.PENDING,
@@ -577,13 +618,13 @@ class JobManager:
                 )
 
             driver_logger.info("Runtime env is setting up.")
-            supervisor = self._supervisor_actor_cls.options(
+            supervisor_options = dict(
                 lifetime="detached",
                 name=JOB_ACTOR_NAME_TEMPLATE.format(job_id=submission_id),
                 num_cpus=entrypoint_num_cpus,
                 num_gpus=entrypoint_num_gpus,
                 memory=entrypoint_memory,
-                resources=entrypoint_resources,
+                resources=resources_for_supervisor,
                 scheduling_strategy=scheduling_strategy,
                 runtime_env=self._get_supervisor_runtime_env(
                     runtime_env, submission_id, resources_specified
@@ -592,6 +633,11 @@ class JobManager:
                 # Don't pollute task events with system actor tasks that users don't
                 # know about.
                 enable_task_events=False,
+            )
+            if label_selector:
+                supervisor_options["label_selector"] = label_selector
+            supervisor = self._supervisor_actor_cls.options(
+                **supervisor_options
             ).remote(
                 submission_id,
                 entrypoint,
