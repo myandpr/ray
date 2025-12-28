@@ -70,11 +70,6 @@ def _split_entrypoint_resources(
     label_selector: Dict[str, str] = {}
 
     for key, value in resources.items():
-        if not isinstance(key, str):
-            raise TypeError(
-                "entrypoint_resources keys must be strings, "
-                f"got {type(key)} for key {key!r}"
-            )
         if isinstance(value, (int, float)):
             numeric_resources[key] = value
         elif isinstance(value, str):
@@ -570,8 +565,6 @@ class JobManager:
         await self._recover_running_jobs_event.wait()
 
         logger.info(f"Starting job with submission_id: {submission_id}")
-        resources_for_supervisor = entrypoint_resources
-        label_selector = None
         resources_for_supervisor, label_selector = _split_entrypoint_resources(
             entrypoint_resources
         )
