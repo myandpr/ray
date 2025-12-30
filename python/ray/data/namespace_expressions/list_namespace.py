@@ -16,6 +16,32 @@ if TYPE_CHECKING:
     from ray.data.expressions import Expr, UDFExpr
 
 
+def _ensure_array(arr: pyarrow.Array) -> pyarrow.Array:
+    """Convert ChunkedArray to Array if needed."""
+    if isinstance(arr, pyarrow.ChunkedArray):
+        return arr.combine_chunks()
+    return arr
+
+
+def _build_list_array(
+    offsets: pyarrow.Array,
+    values: pyarrow.Array,
+    is_large: bool,
+    null_mask: pyarrow.Array | None = None,
+) -> pyarrow.Array:
+    """Reconstruct a ListArray from offsets and values."""
+    offsets_type = pyarrow.int64() if is_large else pyarrow.int32()
+    offsets = pc.cast(offsets, offsets_type)
+    array_cls = pyarrow.LargeListArray if is_large else pyarrow.ListArray
+    return array_cls.from_arrays(offsets, values, mask=null_mask)
+
+
+def _counts_to_offsets(counts: pyarrow.Array) -> pyarrow.Array:
+    """Convert per-row counts to list offsets via cumulative sum."""
+    cumsum = pc.cumulative_sum(counts)
+    return pyarrow.concat_arrays([pyarrow.array([0], type=cumsum.type), cumsum])
+
+
 def _infer_flattened_dtype(expr: "Expr") -> DataType:
     """Infer the return DataType after flattening one level of list nesting."""
     if not expr.data_type.is_arrow_type():
@@ -187,8 +213,7 @@ class _ListNamespace:
 
         @pyarrow_udf(return_dtype=return_dtype)
         def _list_sort(arr: pyarrow.Array) -> pyarrow.Array:
-            if isinstance(arr, pyarrow.ChunkedArray):
-                arr = arr.combine_chunks()
+            arr = _ensure_array(arr)
 
             arr_type = arr.type
             arr_dtype = DataType.from_arrow(arr_type)
@@ -226,17 +251,9 @@ class _ListNamespace:
 
             lengths = pc.list_value_length(sort_arr)
             lengths = pc.fill_null(lengths, 0)
-            cumsum = pc.cumulative_sum(lengths)
-            offsets = pyarrow.concat_arrays(
-                [pyarrow.array([0], type=cumsum.type), cumsum]
-            )
-
             is_large = pyarrow.types.is_large_list(arr_type)
-            offsets_type = pyarrow.int64() if is_large else pyarrow.int32()
-            offsets = pc.cast(offsets, offsets_type)
-
-            array_cls = pyarrow.LargeListArray if is_large else pyarrow.ListArray
-            sorted_arr = array_cls.from_arrays(offsets, values, mask=null_mask)
+            offsets = _counts_to_offsets(lengths)
+            sorted_arr = _build_list_array(offsets, values, is_large, null_mask)
 
             if pyarrow.types.is_fixed_size_list(original_type):
                 sorted_arr = sorted_arr.cast(original_type)
@@ -252,8 +269,7 @@ class _ListNamespace:
 
         @pyarrow_udf(return_dtype=return_dtype)
         def _list_flatten(arr: pyarrow.Array) -> pyarrow.Array:
-            if isinstance(arr, pyarrow.ChunkedArray):
-                arr = arr.combine_chunks()
+            arr = _ensure_array(arr)
 
             _validate_nested_list(arr.type)
 
@@ -262,9 +278,8 @@ class _ListNamespace:
 
             n_rows: int = len(arr)
             if len(all_scalars) == 0:
-                offsets: pyarrow.Array = pyarrow.array(
-                    np.repeat(0, n_rows + 1), type=pyarrow.int64()
-                )
+                counts = pyarrow.array(np.repeat(0, n_rows), type=pyarrow.int64())
+                offsets = _counts_to_offsets(counts)
             else:
                 row_indices: pyarrow.Array = pc.take(
                     pc.list_parent_indices(arr),
@@ -288,17 +303,10 @@ class _ListNamespace:
                     pc.take(scalar_counts, pc.fill_null(positions, 0)),
                 )
 
-                cumsum: pyarrow.Array = pc.cumulative_sum(counts)
-                offsets = pyarrow.concat_arrays(
-                    [pyarrow.array([0], type=cumsum.type), cumsum]
-                )
+                offsets = _counts_to_offsets(counts)
 
             is_large: bool = pyarrow.types.is_large_list(arr.type)
-            offsets_type = pyarrow.int64() if is_large else pyarrow.int32()
-            offsets = pc.cast(offsets, offsets_type)
-
             null_mask: pyarrow.Array | None = arr.is_null() if arr.null_count else None
-            array_cls: type = pyarrow.LargeListArray if is_large else pyarrow.ListArray
-            return array_cls.from_arrays(offsets, all_scalars, mask=null_mask)
+            return _build_list_array(offsets, all_scalars, is_large, null_mask)
 
         return _list_flatten(self._expr)
