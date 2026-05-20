@@ -1,19 +1,23 @@
+from typing import Optional
+
 from ray.data._internal.logical.interfaces import LogicalOperator, LogicalPlan
 from ray.data.context import DataContext
 
 
 class DummyLogicalOperator(LogicalOperator):
+    _name: Optional[str]
+    num_outputs: Optional[int]
+
     def __init__(self, input_dependencies, name=None, num_outputs=None):
         super().__init__(
-            _num_outputs=num_outputs,
+            input_dependencies=input_dependencies,
         )
-        object.__setattr__(self, "_input_dependencies", input_dependencies)
-        if name is not None:
-            object.__setattr__(self, "_name", name)
+        object.__setattr__(self, "_name", name)
+        object.__setattr__(self, "num_outputs", num_outputs)
 
     @property
-    def num_outputs(self):
-        return self._num_outputs
+    def name(self):
+        return self._name or self.__class__.__name__
 
 
 def test_sources_singleton():
