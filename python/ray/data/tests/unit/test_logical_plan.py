@@ -1,6 +1,8 @@
 from typing import Optional
 
 from ray.data._internal.logical.interfaces import LogicalOperator, LogicalPlan
+from ray.data._internal.logical.rules.limit_pushdown import LimitPushdownRule
+from ray.data._internal.logical.rules.predicate_pushdown import PredicatePushdown
 from ray.data.context import DataContext
 
 
@@ -78,6 +80,26 @@ def test_logical_operator_transform_supports_custom_subclasses():
     assert transformed is not sink
     assert transformed.name == "sink"
     assert transformed.input_dependencies == [replacement]
+    assert sink.input_dependencies == [source]
+
+
+def test_rule_copy_fallback_supports_custom_subclasses():
+    source = DummyLogicalOperator([], name="source")
+    replacement = DummyLogicalOperator([], name="replacement")
+    sink = DummyLogicalOperator([source], name="sink")
+
+    predicate_result = PredicatePushdown._clone_op_with_new_inputs(sink, [replacement])
+    assert predicate_result is not sink
+    assert predicate_result.name == "sink"
+    assert predicate_result.input_dependencies == [replacement]
+    assert sink.input_dependencies == [source]
+
+    limit_result = LimitPushdownRule()._recreate_operator_with_new_input(
+        sink, replacement
+    )
+    assert limit_result is not sink
+    assert limit_result.name == "sink"
+    assert limit_result.input_dependencies == [replacement]
     assert sink.input_dependencies == [source]
 
 
