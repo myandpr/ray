@@ -27,7 +27,7 @@ class AbstractOneToOne(LogicalOperator):
     """
 
     _name: Optional[str] = field(init=False, default=None, repr=False)
-    _num_outputs: Optional[int] = field(init=False, default=None, repr=False)
+    num_outputs: Optional[int] = field(init=False, default=None, repr=False)
 
     def __init__(
         self,
@@ -50,7 +50,7 @@ class AbstractOneToOne(LogicalOperator):
         super().__init__(
             input_dependencies=input_dependencies,
         )
-        object.__setattr__(self, "_num_outputs", num_outputs)
+        object.__setattr__(self, "num_outputs", num_outputs)
         if name is not None:
             object.__setattr__(self, "_name", name)
         object.__setattr__(self, "can_modify_num_rows", can_modify_num_rows)
@@ -58,10 +58,6 @@ class AbstractOneToOne(LogicalOperator):
     @property
     def name(self) -> str:
         return self._name or super().name
-
-    @property
-    def num_outputs(self) -> Optional[int]:
-        return self._num_outputs
 
 
 @dataclass(frozen=True, repr=False, eq=False)

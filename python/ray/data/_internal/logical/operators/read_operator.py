@@ -39,7 +39,7 @@ __all__ = [
 ]
 
 
-@dataclass(frozen=True, repr=False, eq=False)
+@dataclass(frozen=True, repr=False, eq=False, init=False)
 class Read(
     AbstractMap,
     SourceOperator,
@@ -60,14 +60,35 @@ class Read(
     ray_remote_args_fn: None = field(init=False, default=None)
     per_block_limit: Optional[int] = None
 
-    def __post_init__(self):
-        super().__post_init__()
-        if self.compute is None:
-            from ray.data._internal.compute import TaskPoolStrategy
-
-            object.__setattr__(self, "compute", TaskPoolStrategy())
-        if self.ray_remote_args is None:
-            object.__setattr__(self, "ray_remote_args", {})
+    def __init__(
+        self,
+        datasource: Datasource,
+        datasource_or_legacy_reader: Union[Datasource, Reader],
+        parallelism: int,
+        num_outputs: Optional[int] = None,
+        ray_remote_args: Optional[Dict[str, Any]] = None,
+        compute: Optional[ComputeStrategy] = None,
+        detected_parallelism: Optional[int] = None,
+        per_block_limit: Optional[int] = None,
+        *,
+        input_dependencies: Optional[List[LogicalOperator]] = None,
+    ):
+        super().__init__(
+            input_dependencies=input_dependencies or [],
+            can_modify_num_rows=True,
+            num_outputs=num_outputs,
+            min_rows_per_bundled_input=None,
+            ray_remote_args=ray_remote_args,
+            ray_remote_args_fn=None,
+            compute=compute,
+        )
+        object.__setattr__(self, "datasource", datasource)
+        object.__setattr__(
+            self, "datasource_or_legacy_reader", datasource_or_legacy_reader
+        )
+        object.__setattr__(self, "parallelism", parallelism)
+        object.__setattr__(self, "detected_parallelism", detected_parallelism)
+        object.__setattr__(self, "per_block_limit", per_block_limit)
 
     @property
     def name(self) -> str:
