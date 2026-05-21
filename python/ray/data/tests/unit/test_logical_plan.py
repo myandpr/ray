@@ -6,18 +6,22 @@ from ray.data.context import DataContext
 
 class DummyLogicalOperator(LogicalOperator):
     _name: Optional[str]
-    num_outputs: Optional[int]
+    _num_outputs: Optional[int]
 
     def __init__(self, input_dependencies, name=None, num_outputs=None):
         super().__init__(
             input_dependencies=input_dependencies,
         )
         object.__setattr__(self, "_name", name)
-        object.__setattr__(self, "num_outputs", num_outputs)
+        object.__setattr__(self, "_num_outputs", num_outputs)
 
     @property
     def name(self):
         return self._name or self.__class__.__name__
+
+    @property
+    def num_outputs(self):
+        return self._num_outputs
 
 
 def test_sources_singleton():

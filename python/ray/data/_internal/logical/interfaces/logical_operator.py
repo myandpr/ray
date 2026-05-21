@@ -23,11 +23,14 @@ class LogicalOperator(Operator, ABC):
     input_dependencies: List["LogicalOperator"] = field(
         default_factory=list, repr=False, kw_only=True
     )
-    num_outputs = None
 
     @property
     def name(self) -> str:
         return self.__class__.__name__
+
+    @property
+    def num_outputs(self) -> Optional[int]:
+        return None
 
     def estimated_num_outputs(self) -> Optional[int]:
         """Returns the estimated number of blocks that
